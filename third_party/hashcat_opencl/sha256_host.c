@@ -22,7 +22,7 @@
   } while (0)
 
 // 一批最多处理多少行（可根据内存调大或调小）
-#define MAX_BATCH_LINES 10000000u  // 1e7
+#define MAX_BATCH_LINES 100000000u  // 1e7
 
 // 读取 CL 源码文件
 static char *read_text_file (const char *path, size_t *out_size)

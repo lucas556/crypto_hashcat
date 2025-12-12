@@ -8,6 +8,20 @@
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 
+/*
+ * 在很多系统里，如果 CL_TARGET_OPENCL_VERSION < 200，
+ * 头文件不会声明 cl_queue_properties 和 clCreateCommandQueueWithProperties。
+ * 这里自己补上 typedef + 原型，方便在 OpenCL 1.2 头文件下使用 2.0 API。
+ */
+#ifndef CL_VERSION_2_0
+typedef cl_bitfield cl_queue_properties;
+extern CL_API_ENTRY cl_command_queue CL_API_CALL
+clCreateCommandQueueWithProperties (cl_context                 context,
+                                    cl_device_id               device,
+                                    const cl_queue_properties *properties,
+                                    cl_int                    *errcode_ret);
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -22,7 +36,7 @@
   } while (0)
 
 // 一批最多处理多少行（可根据内存调大或调小）
-#define MAX_BATCH_LINES 50000000u  // 1e7
+#define MAX_BATCH_LINES 50000000u  // 5000 万
 
 // 读取 CL 源码文件
 static char *read_text_file (const char *path, size_t *out_size)
@@ -71,12 +85,14 @@ static void print_platform_device_info (cl_platform_id platform, cl_device_id de
 
   if (clGetPlatformInfo (platform, CL_PLATFORM_NAME, sizeof (buf), buf, &sz) == CL_SUCCESS)
   {
+    if (sz >= sizeof (buf)) sz = sizeof (buf) - 1;
     buf[sz] = '\0';
     fprintf (stderr, "[OpenCL] Platform: %s\n", buf);
   }
 
   if (clGetDeviceInfo (device, CL_DEVICE_NAME, sizeof (buf), buf, &sz) == CL_SUCCESS)
   {
+    if (sz >= sizeof (buf)) sz = sizeof (buf) - 1;
     buf[sz] = '\0';
     fprintf (stderr, "[OpenCL] Device  : %s\n", buf);
   }
@@ -199,9 +215,15 @@ int main (int argc, char **argv)
   cl_context context = clCreateContext (NULL, 1, &device, NULL, NULL, &err);
   CHECK_CL (err, "clCreateContext");
 
+  const cl_queue_properties props[] =
+  {
+    CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE,
+    0
+  };
+
   cl_command_queue queue =
-      clCreateCommandQueue (context, device, CL_QUEUE_PROFILING_ENABLE, &err);
-  CHECK_CL (err, "clCreateCommandQueue");
+      clCreateCommandQueueWithProperties (context, device, props, &err);
+  CHECK_CL (err, "clCreateCommandQueueWithProperties");
 
   // 3. 读取 & 编译 sha256_wrapper.cl （只编译一次）
   size_t src_size = 0;
@@ -241,8 +263,8 @@ int main (int argc, char **argv)
   // 4. 为 batch 分配复用的 host 侧辅助数组
   uint32_t max_batch_lines = MAX_BATCH_LINES;
 
-  char   **line_bufs = (char   **) malloc (max_batch_lines * sizeof (char *));
-  uint32_t *lens_host = (uint32_t *) malloc (max_batch_lines * sizeof (uint32_t));
+  char     **line_bufs = (char   **) malloc (max_batch_lines * sizeof (char *));
+  uint32_t *lens_host  = (uint32_t *) malloc (max_batch_lines * sizeof (uint32_t));
   if (!line_bufs || !lens_host)
   {
     fprintf (stderr, "malloc failed for batch metadata\n");
@@ -252,19 +274,19 @@ int main (int argc, char **argv)
   }
 
   // 用于 getline
-  char *line = NULL;
+  char  *line    = NULL;
   size_t linecap = 0;
 
   // 统计整体性能
-  double total_kernel_time_s = 0.0;
-  unsigned long long total_msgs = 0ULL;
-  unsigned int batch_index = 0;
+  double              total_kernel_time_s = 0.0;
+  unsigned long long  total_msgs          = 0ULL;
+  unsigned int        batch_index         = 0;
 
   for (;;)
   {
     // 5. 读一批行
     uint32_t num_msgs = 0;
-    size_t max_len = 0;
+    size_t   max_len  = 0;
 
     for (;;)
     {
@@ -317,7 +339,7 @@ int main (int argc, char **argv)
     }
 
     uint32_t msg_stride = (uint32_t) (stride_bytes / 4);
-    size_t total_bytes  = (size_t) num_msgs * stride_bytes;
+    size_t   total_bytes  = (size_t) num_msgs * stride_bytes;
 
     fprintf (stderr,
              "[OpenCL] Batch %u: %u messages, max_len=%zu, stride_bytes=%zu (msg_stride=%u)\n",
@@ -383,7 +405,7 @@ int main (int argc, char **argv)
               "clSetKernelArg(digests)");
 
     // 9. 启动 kernel + profiling
-    size_t global_work_size[1] = { (size_t) num_msgs };
+    size_t   global_work_size[1] = { (size_t) num_msgs };
     cl_event kernel_event;
 
     CHECK_CL (clEnqueueNDRangeKernel (queue, kernel, 1, NULL,
@@ -439,7 +461,7 @@ int main (int argc, char **argv)
     for (uint32_t k = 0; k < num_msgs; k++)
     {
       uint32_t *d = digests_host + (size_t) k * 8u;
-      uint8_t digest[32];
+      uint8_t   digest[32];
 
       // 以大端方式写入（和标准 SHA256 一致）
       for (int j = 0; j < 8; j++)
@@ -459,7 +481,7 @@ int main (int argc, char **argv)
     if (batch_index == 1 && num_msgs > 0)
     {
       uint32_t *d0 = digests_host + 0 * 8u;
-      uint8_t digest0[32];
+      uint8_t   digest0[32];
       for (int j = 0; j < 8; j++)
       {
         uint32_t v = d0[j];
